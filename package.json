@@ -1,0 +1,15 @@
+{
+    "name": "sms-relay",
+    "version": "1.0.0",
+    "scripts": {
+        "start": "node index.js"
+    },
+    "engines": {
+        "node": ">=20"
+    },
+    "dependencies": {
+        "dotenv": "^17.4.2",
+        "express": "^4.18.2",
+        "twilio": "^6.0.0"
+    }
+}
