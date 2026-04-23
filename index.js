@@ -1,42 +1,57 @@
 require("dotenv").config();
 const express = require("express");
-const twilio = require("twilio");
+const telnyx = require("telnyx");
 
 const app = express();
 app.set("trust proxy", true);
-app.use(express.urlencoded({ extended: false }));
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TELNYX_PUBLIC_KEY = process.env.TELNYX_PUBLIC_KEY;
 
-if (!SLACK_WEBHOOK_URL || !TWILIO_AUTH_TOKEN) {
-  console.error("Missing SLACK_WEBHOOK_URL or TWILIO_AUTH_TOKEN env var");
+if (!SLACK_WEBHOOK_URL || !TELNYX_PUBLIC_KEY) {
+  console.error("Missing SLACK_WEBHOOK_URL or TELNYX_PUBLIC_KEY env var");
   process.exit(1);
 }
 
-app.post("/sms", async (req, res) => {
-  const signature = req.header("X-Twilio-Signature");
-  const url = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
-  const isValid = twilio.validateRequest(
-    TWILIO_AUTH_TOKEN,
-    signature,
-    url,
-    req.body
-  );
+const publicKeyBuf = Buffer.from(TELNYX_PUBLIC_KEY, "base64");
 
-  if (!isValid) {
-    console.warn("Rejected request with invalid Twilio signature", { url });
+app.post("/sms", express.raw({ type: "application/json" }), async (req, res) => {
+  const rawBody = req.body.toString("utf8");
+  const signatureHeader = req.header("telnyx-signature-ed25519");
+  const timestamp = req.header("telnyx-timestamp");
+
+  if (!signatureHeader || !timestamp) {
+    console.warn("Rejected request missing Telnyx signature headers");
     return res.status(403).send("Forbidden");
   }
 
-  const { From, Body } = req.body;
+  const signatureBuf = Buffer.from(signatureHeader, "base64");
+
+  let event;
+  try {
+    event = telnyx.webhooks.constructEvent(rawBody, signatureBuf, timestamp, publicKeyBuf);
+  } catch (err) {
+    if (err instanceof telnyx.errors.TelnyxSignatureVerificationError) {
+      console.warn("Rejected request with invalid Telnyx signature", { reason: err.message });
+      return res.status(403).send("Forbidden");
+    }
+    throw err;
+  }
+
+  if (event.data?.event_type !== "message.received") {
+    console.log("Ignoring non-inbound event", { type: event.data?.event_type });
+    return res.status(200).send("OK");
+  }
+
+  const from = event.data.payload.from.phone_number;
+  const body = event.data.payload.text;
 
   try {
     const slackRes = await fetch(SLACK_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        text: `🔐 *2FA Code Received*\nFrom: ${From}\nMessage: *${Body}*`
+        text: `🔐 *2FA Code Received*\nFrom: ${from}\nMessage: *${body}*`
       })
     });
     if (!slackRes.ok) {
@@ -46,8 +61,7 @@ app.post("/sms", async (req, res) => {
     console.error("Failed to post to Slack", err);
   }
 
-  res.set("Content-Type", "text/xml");
-  res.send("<Response></Response>");
+  res.status(200).send("OK");
 });
 
 app.get("/health", (req, res) => res.send("ok"));
